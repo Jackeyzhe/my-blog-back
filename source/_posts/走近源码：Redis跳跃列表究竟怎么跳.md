@@ -39,7 +39,7 @@ comments: true
 
 Redis中的实现是
 
-``` c
+```c
 /* Returns a random level for the new skiplist node we are going to create.
  * The return value of this function is between 1 and ZSKIPLIST_MAXLEVEL
  * (both inclusive), with a powerlaw-alike distribution where higher
@@ -58,7 +58,7 @@ int zslRandomLevel(void) {
 
 Redis中的skiplist是作为zset的一种内部存储结构
 
-``` c
+```c
 /* ZSETs use a specialized version of Skiplists */
 typedef struct zskiplistNode {
     sds ele;
@@ -154,7 +154,7 @@ if (zobj->encoding == OBJ_ENCODING_SKIPLIST) {
 
 如果要插入的元素不存在，那么就直接调用zslInsert函数。
 
-``` c
+```c
 zskiplistNode *zslInsert(zskiplist *zsl, double score, sds ele) {
     zskiplistNode *update[ZSKIPLIST_MAXLEVEL], *x;
     unsigned int rank[ZSKIPLIST_MAXLEVEL];
@@ -231,7 +231,7 @@ zskiplistNode *zslInsert(zskiplist *zsl, double score, sds ele) {
 
 了解了插入过程以后我们再回过头来看更新过程
 
-``` c
+```c
 zskiplistNode *zslUpdateScore(zskiplist *zsl, double curscore, sds ele, double newscore) {
     zskiplistNode *update[ZSKIPLIST_MAXLEVEL], *x;
     int i;
@@ -283,7 +283,7 @@ zskiplistNode *zslUpdateScore(zskiplist *zsl, double curscore, sds ele, double n
 
 Redis中skiplist的更新过程还是比较容易理解的，就是先删除再插入，那么我们接下来就看看它是如何删除节点的。
 
-``` c
+```c
 void zslDeleteNode(zskiplist *zsl, zskiplistNode *x, zskiplistNode **update) {
     int i;
     for (i = 0; i < zsl->level; i++) {

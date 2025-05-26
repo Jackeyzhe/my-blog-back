@@ -87,7 +87,7 @@ POST /\<index>/\_update/\<_id>
 
 下面的一个例子是用脚本来更新文档
 
-``` bash
+```bash
 curl -X POST "localhost:9200/test/_update/1?pretty" -H 'Content-Type: application/json' -d'
 {
     "script" : {
@@ -103,7 +103,7 @@ curl -X POST "localhost:9200/test/_update/1?pretty" -H 'Content-Type: applicatio
 
 #### Upsert
 
-``` bash
+```bash
 curl -X POST "localhost:9200/test/_update/1?pretty" -H 'Content-Type: application/json' -d'
 {
     "script" : {
@@ -122,7 +122,7 @@ curl -X POST "localhost:9200/test/_update/1?pretty" -H 'Content-Type: applicatio
 
 当指定的文档不存在时，可以使用upsert参数，创建一个新的文档，而当指定的文档存在时，该请求会执行script中的脚本。如果不想使用脚本，而只想新增/更新文档的话，可以使用doc_as_upsert。
 
-``` bash
+```bash
 curl -X POST "localhost:9200/test/_update/1?pretty" -H 'Content-Type: application/json' -d'
 {
     "doc" : {
@@ -137,7 +137,7 @@ curl -X POST "localhost:9200/test/_update/1?pretty" -H 'Content-Type: applicatio
 
 这个API是用于批量更新检索出的文档的，具体可以通过一个例子来了解。
 
-``` bash
+```bash
 curl -X POST "localhost:9200/twitter/_update_by_query?pretty" -H 'Content-Type: application/json' -d'
 {
   "script": {
@@ -194,7 +194,7 @@ mget的请求参数和get相同，只是需要在请求体中指定doc的相关�
 
 **request**
 
-``` bash
+```bash
 GET /_mget
 {
     "docs" : [
@@ -212,7 +212,7 @@ GET /_mget
 
 **response**
 
-``` bash
+```bash
 {
   "docs" : [
     {
@@ -279,7 +279,7 @@ POST /\<index>/\_delete_by_query
 
 在这个请求中，你可以任意使用之前的CRUD请求的组合。
 
-``` bash
+```bash
 curl -X POST "localhost:9200/_bulk?pretty" -H 'Content-Type: application/json' -d'
 { "index" : { "_index" : "test", "_id" : "1" } }
 { "field1" : "value1" }
@@ -299,7 +299,7 @@ curl -X POST "localhost:9200/_bulk?pretty" -H 'Content-Type: application/json' -
 
 上面的例子执行完之后，我们得到的结果应该是
 
-``` bash
+```bash
 {
    "took": 30,
    "errors": false,
