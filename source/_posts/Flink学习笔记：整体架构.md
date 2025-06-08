@@ -4,7 +4,9 @@ date: 2025-05-04 11:31:31
 tags: Flink
 ---
 
-开一个新坑，系统性的学习下 Flink，计划从整体架构到核心概念再到调优方法，最后是相关源码的阅读。
+开一个新坑，系统性的学习下 Flink，计划从整体架构到核心概念再到调优方法，最后是相关源码的阅读。<!-- more -->
+
+<!-- more -->
 
 今天就来学习 Flink 整体架构，我们先看官网的架构图
 
@@ -82,8 +84,33 @@ Network Manager 主要负责 TaskManager 之间的数据交互，它是基于 Ne
 
 #### Session Mode
 
-Session Mode 下，所有的任务共享 JobManager 和 TaskManager，JobManager 的生命周期不受
+Session Mode 下，所有的任务共享 JobManager 和 TaskManager，JobManager 的生命周期不受提交的 Job 影响，会长期运行。
+
+![SessionMode](https://res.cloudinary.com/dxydgihag/image/upload/v1749406344/Blog/flink/0/SessionMode.png)
 
 #### Per-Job Mode
 
+Per-Job Mode 下，每个任务独享 JobManager 和 TaskManager，资源充分隔离。JobManager 的生命周期和 Job 的生命周期绑定。
+
+![Per-JobMode](https://res.cloudinary.com/dxydgihag/image/upload/v1749406344/Blog/flink/0/Per-job.png)
+
 #### Application Mode
+
+Application Mode 下，每个 Application 对应一个 JobManager，且可以运行多个作业。客户端无需将依赖包上传到 JobManager，只负责提交作业，减轻了客户端的压力。提交作业后，JobManager 主动从 HDFS 拉取依赖包。
+
+![ApplicationMode](https://res.cloudinary.com/dxydgihag/image/upload/v1749406344/Blog/flink/0/Application.png)
+
+#### 三种模式的对比
+
+|     | Session                            | Per-Job                            | Application                                                  |
+|:---:|:----------------------------------:|:----------------------------------:|:------------------------------------------------------------:|
+| 优点  | 1、资源充分共享，提升资源利用率<br/>2、作业集中管理，运维简单 | 1、资源充分隔离<br/>2、每个作业的 TM Slots 可以不同 | 1、有效降低带宽和客户端负载<br/>2、Application 之间实现资源隔离，Application 中的资源共享 |
+| 缺点  | 1、资源隔离差<br/>2、TM 不易扩展，伸缩性差         | 1、资源浪费                             | 1、仅支持 Yarn 和 Kubunetes （个人感觉够用了）                             |
+
+### 总结
+
+最后来总结一下，今天主要学习了 Flink 的整体架构和三种部署模式。
+
+1、Flink 的集群架构上主要包含 JobManager 和 TaskManager，其中 JobManager 主要负责一些作业调度和资源协调的工作，TaskManager 则主要负责执行任务。
+
+2、Flink 的部署模式分为 Session、Per-Job 和 Application 三种，Session 模式是所有 Job 共享 JobManager 和 TaskManager，Per-Job 则是作业独享的，而 Application 模式则是在 Application 中共享 JobManager。
