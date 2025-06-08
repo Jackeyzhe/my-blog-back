@@ -238,4 +238,3 @@ curl -X PUT "localhost:9200/my_source_index/_settings?pretty" -H 'Content-Type: 
 ### 总结
 
 关于索引的使用就先介绍到这里。还有很多不完善的地方，以后会继续补充。想要了解更多详细信息的同学可以查看[官方文档](https://www.elastic.co/guide/en/elasticsearch/reference/7.4/indices.html)。
-
