@@ -156,9 +156,7 @@ WatermarkStrategy.forMonotonousTimestamps();
 
 最后，再补充一个与 watermark 相关的比较重要的特性。在 Flink 中，会有一些算子有多个输入源。这时，这个算子的 watermark 是以它收到的数据源中最小的 eventTime 来计算的。直接看官网的例子：
 
-![parallel_stream_watermark](https://res.cloudinary.com/dxydgihag/image/upload/v1751294872/Blog/flink/1/parallel_streams_watermarks.svg)
-
-
+![parallel_streams_watermarks](https://res.cloudinary.com/dxydgihag/image/upload/v1752592909/Blog/flink/1/parallel_streams_watermarks.png)
 
 那么这里就存在一个问题：如果一个输入源数据量很少，很久才发一条消息，而另一个数据源发了很多消息，那么就会在下游算子中积累很多消息等待处理，这对于整个系统的稳定性造成了很大的风险。
 
