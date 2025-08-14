@@ -1,0 +1,7 @@
+# 背景动画配置
+canvas_nest:
+  enable: true  # 启用粒子连线动画
+  color: '0,0,255'  # 线条颜色（RGB值）
+  opacity: 0.5  # 透明度
+  zIndex: -1    # 层级（置于底层）
+  count: 99     # 粒子数量
