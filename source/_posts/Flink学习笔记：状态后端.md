@@ -38,7 +38,7 @@ JobManagerCheckpointStorage 是将快照存储在 JobManager 的堆内存中。J
 
 #### FileSystemCheckpointStorage
 
-FileSystemCheckpointStorage 是将状态数据保存在外部存储中，要适用 FileSystemCheckpointStorage，需要配置文件系统的 URL。例如：“hdfs://namenode:40010/flink/checkpoints”。而元数据
+FileSystemCheckpointStorage 是将状态数据保存在外部存储中，要适用 FileSystemCheckpointStorage，需要配置文件系统的 URL。例如：“hdfs://namenode:40010/flink/checkpoints”。而元数据则存储在 JobManager 的内存中。
 
 ### Checkpoint 存储设置
 
