@@ -18,7 +18,7 @@ HyperLogLog是Redis的高级数据结构，是统计基数的利器。[前文](h
 
 ##### bitmap
 
-bitmap同样是一种可以统计基数的方法，可以理解为用bit数组存储元素，例如01101001，表示的是[1,2,4,8]，bitmap中1的个数就是基数。bitmap也可以轻松合并多个集合，只需要将多个数组进行异或操作就可以了。bitmap相比于Set也大大节省了内存，我们来粗略计算一下，统计1亿个数据的基数，需要的内存是：100000000/8/1024/1024 ≈ 12M。
+bitmap同样是一种可以统计基数的方法，可以理解为用bit数组存储元素，例如011010001，表示的是[1,2,4,8]，bitmap中1的个数就是基数。bitmap也可以轻松合并多个集合，只需要将多个数组进行异或操作就可以了。bitmap相比于Set也大大节省了内存，我们来粗略计算一下，统计1亿个数据的基数，需要的内存是：100000000/8/1024/1024 ≈ 12M。
 
 虽然bitmap在节省空间方面已经有了不错的表现，但是如果需要统计1000个对象，就需要大约12G的内存，显然这个结果仍然不能令我们满意。在这种情况下，HyperLogLog将会出来拯救我们。
 
@@ -38,7 +38,7 @@ k是每回合抛到1所用的次数，我们已知的是最大的k值，可以�
 
 其中m是桶的数量，const是修正常数，它的取值会根据m而变化。p=log<sub>2</sub>m
 
-``` java
+```java
 switch (p) {
    case 4:
        constant = 0.673 * m * m;
@@ -59,7 +59,7 @@ switch (p) {
 
 密集存储比较简单，就是连续16384个6bit的串成的位图。由于每个桶是6bit，因此对桶的定位要麻烦一些。
 
-``` c
+```c
 #define HLL_BITS 6 /* Enough to count up to 63 leading zeroes. */
 #define HLL_REGISTER_MAX ((1<<HLL_BITS)-1)
 /* Store the value of the register at position 'regnum' into variable 'target'.
@@ -120,7 +120,7 @@ Redis从稀疏存储转换到密集存储的条件是：
 
 ##### HyperLogLog头结构体
 
-``` c
+```c
 struct hllhdr {
     char magic[4];      /* "HYLL" */
     uint8_t encoding;   /* HLL_DENSE or HLL_SPARSE. */
@@ -132,7 +132,7 @@ struct hllhdr {
 
 ##### 创建HyperLogLog对象
 
-``` c
+```c
 #define HLL_P 14 /* The greater is P, the smaller the error. */
 #define HLL_REGISTERS (1<<HLL_P) /* With P=14, 16384 registers. */
 #define HLL_SPARSE_XZERO_MAX_LEN 16384
@@ -183,7 +183,7 @@ robj *createHLLObject(void) {
 
 ##### PFADD命令
 
-``` c
+```c
 /* PFADD var ele ele ele ... ele => :0 or :1 */
 void pfaddCommand(client *c) {
     robj *o = lookupKeyWrite(c->db,c->argv[1]);
@@ -241,7 +241,7 @@ PFADD命令会先判断key是否存在，如果不存在，则创建一个新的
 
 ##### PFCOUNT命令
 
-``` c
+```c
 /* PFCOUNT var -> approximated cardinality of set. */
 void pfcountCommand(client *c) {
     robj *o;
