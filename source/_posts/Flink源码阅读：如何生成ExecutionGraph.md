@@ -16,7 +16,7 @@ tags: Flink
 
 - **IntermediateResult:** IntermediateResult 表示节点的输出结果，与之对应的是 JobGraph 中的 IntermediateDataSet。
 
-- **IntermediateResultPartition:** IntermediateResultPartition 是每个 ExecutionJobVertex 的输出。
+- **IntermediateResultPartition:** IntermediateResultPartition 是每个 ExecutionVertex 的输出。
 
 - **EdgeManager:** EdgeManager 主要负责存储 ExecutionGraph 中所有之间的连接，包括其并行度。
 
@@ -200,3 +200,289 @@ private void attachJobVertices(
 ```
 
 **initializeJobVertices**
+
+在 DefaultExecutionGraph.initializeJobVertices 中是遍历了刚刚排好序的 JobVertex，获取了 ExecutionJobVertex 之后调用了 ExecutionGraph.initializeJobVertex 方法。
+
+我们直接来看 ExecutionGraph.initializeJobVertex 的逻辑。
+
+```java
+default void initializeJobVertex(ExecutionJobVertex ejv, long createTimestamp)
+        throws JobException {
+    initializeJobVertex(
+            ejv,
+            createTimestamp,
+            VertexInputInfoComputationUtils.computeVertexInputInfos(
+                    ejv, getAllIntermediateResults()::get));
+}
+```
+
+这里先是调用了 VertexInputInfoComputationUtils.computeVertexInputInfos 方法，生成了 Map<IntermediateDataSetID, JobVertexInputInfo> jobVertexInputInfos。它表示的是每个 ExecutionVertex 消费上游 IntermediateResultPartition 的范围。
+
+这里有两种模式，分别是 POINTWISE （点对点）和 ALL_TO_ALL（全对全）
+
+在 POINTWISE 模式中，会按照尽量均匀分布的方式处理。
+
+- 例如上游并发度是4，下游并发度是2时，那么前两个 IntermediateResultPartition 就会被第一个 ExecutionVertex 消费，后两个 IntermediateResultPartition 就会被第二个 ExecutionVertex 消费。
+
+- 如果上游并发度是2，下游是3时，那么下游前两个 IntermediateResultPartition 会被第一个 ExecutionVertex 消费，第三个 IntermediateResultPartition 则会被第二个 ExecutionVertex 消费。
+
+```java
+public static JobVertexInputInfo computeVertexInputInfoForPointwise(
+        int sourceCount,
+        int targetCount,
+        Function<Integer, Integer> numOfSubpartitionsRetriever,
+        boolean isDynamicGraph) {
+
+    final List<ExecutionVertexInputInfo> executionVertexInputInfos = new ArrayList<>();
+
+    if (sourceCount >= targetCount) {
+        for (int index = 0; index < targetCount; index++) {
+
+            int start = index * sourceCount / targetCount;
+            int end = (index + 1) * sourceCount / targetCount;
+
+            IndexRange partitionRange = new IndexRange(start, end - 1);
+            IndexRange subpartitionRange =
+                    computeConsumedSubpartitionRange(
+                            index,
+                            1,
+                            () -> numOfSubpartitionsRetriever.apply(start),
+                            isDynamicGraph,
+                            false,
+                            false);
+            executionVertexInputInfos.add(
+                    new ExecutionVertexInputInfo(index, partitionRange, subpartitionRange));
+        }
+    } else {
+        for (int partitionNum = 0; partitionNum < sourceCount; partitionNum++) {
+
+            int start = (partitionNum * targetCount + sourceCount - 1) / sourceCount;
+            int end = ((partitionNum + 1) * targetCount + sourceCount - 1) / sourceCount;
+            int numConsumers = end - start;
+
+            IndexRange partitionRange = new IndexRange(partitionNum, partitionNum);
+            // Variable used in lambda expression should be final or effectively final
+            final int finalPartitionNum = partitionNum;
+            for (int i = start; i < end; i++) {
+                IndexRange subpartitionRange =
+                        computeConsumedSubpartitionRange(
+                                i,
+                                numConsumers,
+                                () -> numOfSubpartitionsRetriever.apply(finalPartitionNum),
+                                isDynamicGraph,
+                                false,
+                                false);
+                executionVertexInputInfos.add(
+                        new ExecutionVertexInputInfo(i, partitionRange, subpartitionRange));
+            }
+        }
+    }
+    return new JobVertexInputInfo(executionVertexInputInfos);
+}
+```
+
+在 ALL_TO_ALL 模式中，每个下游都会消费所有上游的数据。
+
+```java
+public static JobVertexInputInfo computeVertexInputInfoForAllToAll(
+        int sourceCount,
+        int targetCount,
+        Function<Integer, Integer> numOfSubpartitionsRetriever,
+        boolean isDynamicGraph,
+        boolean isBroadcast,
+        boolean isSingleSubpartitionContainsAllData) {
+    final List<ExecutionVertexInputInfo> executionVertexInputInfos = new ArrayList<>();
+    IndexRange partitionRange = new IndexRange(0, sourceCount - 1);
+    for (int i = 0; i < targetCount; ++i) {
+        IndexRange subpartitionRange =
+                computeConsumedSubpartitionRange(
+                        i,
+                        targetCount,
+                        () -> numOfSubpartitionsRetriever.apply(0),
+                        isDynamicGraph,
+                        isBroadcast,
+                        isSingleSubpartitionContainsAllData);
+        executionVertexInputInfos.add(
+                new ExecutionVertexInputInfo(i, partitionRange, subpartitionRange));
+    }
+    return new JobVertexInputInfo(executionVertexInputInfos);
+}
+```
+
+生成好了 jobVertexInputInfos 之后，我们再回到 DefaultExecutionGraph.initializeJobVertex 方法中。
+
+```java
+@Override
+public void initializeJobVertex(
+        ExecutionJobVertex ejv,
+        long createTimestamp,
+        Map<IntermediateDataSetID, JobVertexInputInfo> jobVertexInputInfos)
+        throws JobException {
+
+    checkNotNull(ejv);
+    checkNotNull(jobVertexInputInfos);
+
+    jobVertexInputInfos.forEach(
+            (resultId, info) ->
+                    this.vertexInputInfoStore.put(ejv.getJobVertexId(), resultId, info));
+
+    ejv.initialize(
+            executionHistorySizeLimit,
+            rpcTimeout,
+            createTimestamp,
+            this.initialAttemptCounts.getAttemptCounts(ejv.getJobVertexId()),
+            executionPlanSchedulingContext);
+
+    ejv.connectToPredecessors(this.intermediateResults);
+
+    for (IntermediateResult res : ejv.getProducedDataSets()) {
+        IntermediateResult previousDataSet =
+                this.intermediateResults.putIfAbsent(res.getId(), res);
+        if (previousDataSet != null) {
+            throw new JobException(
+                    String.format(
+                            "Encountered two intermediate data set with ID %s : previous=[%s] / new=[%s]",
+                            res.getId(), res, previousDataSet));
+        }
+    }
+
+    registerExecutionVerticesAndResultPartitionsFor(ejv);
+
+    // enrich network memory.
+    SlotSharingGroup slotSharingGroup = ejv.getSlotSharingGroup();
+    if (areJobVerticesAllInitialized(slotSharingGroup)) {
+        SsgNetworkMemoryCalculationUtils.enrichNetworkMemory(
+                slotSharingGroup, this::getJobVertex, shuffleMaster);
+    }
+}
+```
+
+首先来看 ExecutionJobVertex.initialize 方法。这个方法主要是生成 IntermediateResult 和 ExecutionVertex。
+
+```java
+protected void initialize(
+        int executionHistorySizeLimit,
+        Duration timeout,
+        long createTimestamp,
+        SubtaskAttemptNumberStore initialAttemptCounts,
+        ExecutionPlanSchedulingContext executionPlanSchedulingContext)
+        throws JobException {
+
+    checkState(parallelismInfo.getParallelism() > 0);
+    checkState(!isInitialized());
+
+    this.taskVertices = new ExecutionVertex[parallelismInfo.getParallelism()];
+
+    this.inputs = new ArrayList<>(jobVertex.getInputs().size());
+
+    // create the intermediate results
+    this.producedDataSets =
+            new IntermediateResult[jobVertex.getNumberOfProducedIntermediateDataSets()];
+
+    for (int i = 0; i < jobVertex.getProducedDataSets().size(); i++) {
+        final IntermediateDataSet result = jobVertex.getProducedDataSets().get(i);
+
+        this.producedDataSets[i] =
+                new IntermediateResult(
+                        result,
+                        this,
+                        this.parallelismInfo.getParallelism(),
+                        result.getResultType(),
+                        executionPlanSchedulingContext);
+    }
+
+    // create all task vertices
+    for (int i = 0; i < this.parallelismInfo.getParallelism(); i++) {
+        ExecutionVertex vertex =
+                createExecutionVertex(
+                        this,
+                        i,
+                        producedDataSets,
+                        timeout,
+                        createTimestamp,
+                        executionHistorySizeLimit,
+                        initialAttemptCounts.getAttemptCount(i));
+
+        this.taskVertices[i] = vertex;
+    }
+
+    // sanity check for the double referencing between intermediate result partitions and
+    // execution vertices
+    for (IntermediateResult ir : this.producedDataSets) {
+        if (ir.getNumberOfAssignedPartitions() != this.parallelismInfo.getParallelism()) {
+            throw new RuntimeException(
+                    "The intermediate result's partitions were not correctly assigned.");
+        }
+    }
+
+    // set up the input splits, if the vertex has any
+    try {
+        @SuppressWarnings("unchecked")
+        InputSplitSource<InputSplit> splitSource =
+                (InputSplitSource<InputSplit>) jobVertex.getInputSplitSource();
+
+        if (splitSource != null) {
+            Thread currentThread = Thread.currentThread();
+            ClassLoader oldContextClassLoader = currentThread.getContextClassLoader();
+            currentThread.setContextClassLoader(graph.getUserClassLoader());
+            try {
+                inputSplits =
+                        splitSource.createInputSplits(this.parallelismInfo.getParallelism());
+
+                if (inputSplits != null) {
+                    splitAssigner = splitSource.getInputSplitAssigner(inputSplits);
+                }
+            } finally {
+                currentThread.setContextClassLoader(oldContextClassLoader);
+            }
+        } else {
+            inputSplits = null;
+        }
+    } catch (Throwable t) {
+        throw new JobException(
+                "Creating the input splits caused an error: " + t.getMessage(), t);
+    }
+}
+```
+
+在创建 ExecutionVertex 时，会创建 IntermediateResultPartition 和 Execution，创建 Execution 时，会设置 attemptNumber，这个值默认是0，如果 ExecutionVertex 是重新调度的，那么 attemptNumber 会自增加1。
+
+ExecutionJobVertex.connectToPredecessors 方法主要是生成 ExecutionVertex 与 IntermediateResultPartition 的关联关系。这里设置关联关系也分成了点对点和全对全两种模式处理，点对点模式需要计算 ExecutionVertex 对应的 IntermediateResultPartition index 的范围。两种模式最终都调用了 connectInternal 方法。
+
+```java
+/** Connect all execution vertices to all partitions. */
+private static void connectInternal(
+        List<ExecutionVertex> taskVertices,
+        List<IntermediateResultPartition> partitions,
+        ResultPartitionType resultPartitionType,
+        EdgeManager edgeManager) {
+    checkState(!taskVertices.isEmpty());
+    checkState(!partitions.isEmpty());
+
+    ConsumedPartitionGroup consumedPartitionGroup =
+            createAndRegisterConsumedPartitionGroupToEdgeManager(
+                    taskVertices.size(), partitions, resultPartitionType, edgeManager);
+    for (ExecutionVertex ev : taskVertices) {
+        ev.addConsumedPartitionGroup(consumedPartitionGroup);
+    }
+
+    List<ExecutionVertexID> consumerVertices =
+            taskVertices.stream().map(ExecutionVertex::getID).collect(Collectors.toList());
+    ConsumerVertexGroup consumerVertexGroup =
+            ConsumerVertexGroup.fromMultipleVertices(consumerVertices, resultPartitionType);
+    for (IntermediateResultPartition partition : partitions) {
+        partition.addConsumers(consumerVertexGroup);
+    }
+
+    consumedPartitionGroup.setConsumerVertexGroup(consumerVertexGroup);
+    consumerVertexGroup.setConsumedPartitionGroup(consumedPartitionGroup);
+}
+```
+
+这个方法中 ev.addConsumedPartitionGroup(consumedPartitionGroup); 负责将 ExecutionVertex 到 IntermediateResultPartition 的关联关系保存在 EdgeManager.vertexConsumedPartitions 中。
+
+而 partition.addConsumers(consumerVertexGroup); 则负责将 IntermediateResultPartition 到 ExecutionVertex 的关系保存在 EdgeManager.partitionConsumers 中。
+
+### 总结
+
+通过本文，我们了解了 Flink 是如何将 JobGraph 转换成 ExecutionGraph 的。其中涉及到的一些核心概念名称比较类似，建议认真学习和理解透彻之后再研究其生成方法和对应关系，也可以借助前文中 ExecutionGraph 示意图辅助学习。
