@@ -55,3 +55,88 @@ esac
 ```
 
 ### JobManager 启动流程
+
+在 StandaloneSessionClusterEntrypoint 的 main 方法中，主要就是加载各种配置和环境变量，然后调用 ClusterEntrypoint.runClusterEntrypoint 来启动集群。跟着调用链一直找到 ClusterEntrypoint.runCluster 方法，这里会启动 ResourceManager、DispatcherRunner 等组件。
+
+```java
+private void runCluster(Configuration configuration, PluginManager pluginManager)
+        throws Exception {
+    synchronized (lock) {
+        // 初始化各种服务
+        initializeServices(configuration, pluginManager);
+
+        // 创建 DispatcherResourceManagerComponentFactory，
+        // 包含了三个核心组件的 Factory
+        // DispatcherRunnerFactory、ResourceManagerFactory、RestEndpointFactory
+        final DispatcherResourceManagerComponentFactory
+                dispatcherResourceManagerComponentFactory =
+                        createDispatcherResourceManagerComponentFactory(configuration);
+
+        // 启动 ResourceManager、DispatcherRunner、WebMonitorEndpoint
+        clusterComponent =
+                dispatcherResourceManagerComponentFactory.create(
+                        configuration,
+                        resourceId.unwrap(),
+                        ioExecutor,
+                        commonRpcService,
+                        haServices,
+                        blobServer,
+                        heartbeatServices,
+                        delegationTokenManager,
+                        metricRegistry,
+                        executionGraphInfoStore,
+                        new RpcMetricQueryServiceRetriever(
+                                metricRegistry.getMetricQueryServiceRpcService()),
+                        failureEnrichers,
+                        this);
+
+        // 关闭服务
+        clusterComponent
+                .getShutDownFuture()
+                .whenComplete(
+                        (ApplicationStatus applicationStatus, Throwable throwable) -> {
+                            if (throwable != null) {
+                                shutDownAsync(
+                                        ApplicationStatus.UNKNOWN,
+                                        ShutdownBehaviour.GRACEFUL_SHUTDOWN,
+                                        ExceptionUtils.stringifyException(throwable),
+                                        false);
+                            } else {
+                                // This is the general shutdown path. If a separate more
+                                // specific shutdown was
+                                // already triggered, this will do nothing
+                                shutDownAsync(
+                                        applicationStatus,
+                                        ShutdownBehaviour.GRACEFUL_SHUTDOWN,
+                                        null,
+                                        true);
+                            }
+                        });
+    }
+}
+```
+
+下面来详细看一下这几个方法， initializeServices 就是负责初始化各种服务，有几个比较重要的可以着重关注下：
+
+```java
+// 初始化并启动一个通用的 RPC Service
+commonRpcService = RpcUtils.createRemoteRpcService(...);
+
+// 创建一个 IO 线程池，线程数量位 CPU 核数 * 4
+ioExecutor = Executors.newFixedThreadPool(...);
+
+// 创建 HA 服务组件，根据配置初始化 Standalone、ZK、K8S 三种
+haServices = createHaServices(configuration, ioExecutor, rpcSystem);
+
+// 创建并启动 blobServer,blobServer 可以理解为是 Flink 内部的
+blobServer = BlobUtils.createBlobServer(...);
+blobServer.start();
+
+// 创建心跳服务
+heartbeatServices = createHeartbeatServices(configuration);
+
+// 创建一个监控服务
+processMetricGroup = MetricUtils.instantiateProcessMetricGroup(...);
+```
+
+createDispatcherResourceManagerComponentFactory 这个方法就是创建了三个工厂类，不需要过多介绍。我们重点关注 dispatcherResourceManagerComponentFactory.create 方法，即 ResourceManager、DispatcherRunner、WebMonitorEndpoint 是如何启动的。
