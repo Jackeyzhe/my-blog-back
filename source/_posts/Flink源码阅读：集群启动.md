@@ -140,3 +140,19 @@ processMetricGroup = MetricUtils.instantiateProcessMetricGroup(...);
 ```
 
 createDispatcherResourceManagerComponentFactory 这个方法就是创建了三个工厂类，不需要过多介绍。我们重点关注 dispatcherResourceManagerComponentFactory.create 方法，即 ResourceManager、DispatcherRunner、WebMonitorEndpoint 是如何启动的。
+
+#### WebMonitorEndpoint
+
+WebMonitorEndpoint 的启动流程图如下，图中细箭头代表同一个方法中顺序调用，粗箭头代表进入上一个方法内部的调用。
+
+![webMonitorEndpoint](https://res.cloudinary.com/dxydgihag/image/upload/v1764428386/Blog/flink/11/webmonitor.png)
+
+第一步是通过工厂创建出了 WebMonitorEndpoint，这里就是比较常规的初始化操作。
+
+第二步是调用 WebMonitorEndpoint 的 start 方法开始启动，start 方法内部先是创建了一个 Router 并调用 initializeHandlers 创建了一大堆 handler（是真的一大堆，这个方法有接近一千行，都是在创建 handler），创建完成之后，对 handler 进行排序和去重，再把它们都注册到 Router 中。这里排序是为了确保路由匹配的正确性，排序规则是先静态路径（/jobs/overview），后动态路径（/jobs/:jobid），假如我们没有排序，先注册了 /jobs/:jobid ，后注册 /jobs/overview ，这时当我们请求 /jobs/overview 时，就会被错误的路由到 /jobs/:jobid 上去。
+
+第三步是调用 startInternal 方法，在 startInternal 方法内部只有 leader 选举和启动缓存清理任务两个步骤。
+
+#### ResourceManager
+
+![ResourceManager](https://res.cloudinary.com/dxydgihag/image/upload/v1764517440/Blog/flink/11/resourceManager.png)
