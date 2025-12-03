@@ -218,3 +218,9 @@ TaskExecutor 是 TaskManager 内部的一个核心组件，负责帮助 TaskMana
 第一步我们在下面详细解释。第二步启动的 TaskSlotTable 是 TaskManager 中负责资源的核心组件，它维护了一个 Slot 列表，管理每个 Slot 的状态，负责 Slot 的分配和释放。第三步主要是和 JobMaster 建立连接并保持心跳，同时也会接收 Slot 申请的请求。
 
 #### 连接 ResourceManager
+
+TaskExecutor 注册完监听之后，会收到 ResourceManagerLeaderListener.notifyLeaderAddress 方法回调。回调方法中，会创建一个 TaskExecutorToResourceManagerConnection 实例并启动它。这个类是用来将 TaskExecutor 注册到 ResourceManager，注册成功会回调 onRegistrationSuccess 方法。回调成功的方法中，TaskManager 会调用 resourceManagerGateway.sendSlotReport 将 Slot 的状态进行上报。
+
+### 总结
+
+本文介绍了 Flink 集群在 Standalone 模式下的启动过程，其中 JobManager 重点介绍了 WebMonitorEndpoint、ResourceManager 和 DispatcherRunner 这三个组件的启动过程。TaskManager 主要介绍了启动 TaskExecutor 和连接 ResourceManager 的过程。
