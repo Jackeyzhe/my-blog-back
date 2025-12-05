@@ -45,3 +45,63 @@ State Backend 用来管理 State 存储，根据存储格式和存储类型的�
 在 StreamTask 的 invoke 方法中，会先调用 restoreStateAndGates 方法去创建 State Backend。完整的调用链路如下图所示。
 
 ![stateBackend](https://res.cloudinary.com/dxydgihag/image/upload/v1764852973/Blog/flink/12/statebackend.png)
+
+在 streamOperatorStateContext 方法中，分别调用了 keyedStatedBackend 和 operatorStateBackend 来创建两种 State Backend。
+
+我们先来看 keyedStateBackend 的逻辑。
+
+```java
+protected <K, R extends Disposable & Closeable> R keyedStatedBackend(
+        TypeSerializer<K> keySerializer,
+        String operatorIdentifierText,
+        PrioritizedOperatorSubtaskState prioritizedOperatorSubtaskStates,
+        CloseableRegistry backendCloseableRegistry,
+        MetricGroup metricGroup,
+        double managedMemoryFraction,
+        StateObject.StateObjectSizeStatsCollector statsCollector,
+        KeyedStateBackendCreator<K, R> keyedStateBackendCreator)
+        throws Exception {
+
+    if (keySerializer == null) {
+        return null;
+    }
+
+    ......
+
+    final KeyGroupRange keyGroupRange =
+            KeyGroupRangeAssignment.computeKeyGroupRangeForOperatorIndex(
+                    taskInfo.getMaxNumberOfParallelSubtasks(),
+                    taskInfo.getNumberOfParallelSubtasks(),
+                    taskInfo.getIndexOfThisSubtask());
+
+    // Now restore processing is included in backend building/constructing process, so we need
+    // to make sure
+    // each stream constructed in restore could also be closed in case of task cancel, for
+    // example the data
+    // input stream opened for serDe during restore.
+    CloseableRegistry cancelStreamRegistryForRestore = new CloseableRegistry();
+    backendCloseableRegistry.registerCloseable(cancelStreamRegistryForRestore);
+    BackendRestorerProcedure<R, KeyedStateHandle> backendRestorer =
+            new BackendRestorerProcedure<>(
+                    (stateHandles) -> {
+                        KeyedStateBackendParametersImpl<K> parameters =
+                                new KeyedStateBackendParametersImpl<>(...);
+                        return keyedStateBackendCreator.create(...),
+                                parameters);
+                    },
+                    backendCloseableRegistry,
+                    logDescription);
+
+    try {
+        return backendRestorer.createAndRestore(
+                prioritizedOperatorSubtaskStates.getPrioritizedManagedKeyedState(),
+                statsCollector);
+    } finally {
+        if (backendCloseableRegistry.unregisterCloseable(cancelStreamRegistryForRestore)) {
+            IOUtils.closeQuietly(cancelStreamRegistryForRestore);
+        }
+    }
+}
+```
+
+这里的创建过程也比较简单，先是获取 KeyGroupRange，表示的是
