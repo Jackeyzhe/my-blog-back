@@ -104,4 +104,8 @@ protected <K, R extends Disposable & Closeable> R keyedStatedBackend(
 }
 ```
 
-这里的创建过程也比较简单，先是获取 KeyGroupRange，表示的是
+这里的创建过程也比较简单，先是获取 KeyGroupRange，它表示的是当前 Operator 上处理的 key 的范围。然后就是创建 StateBackend 实例，这里通过 BackendRestorerProcedure 封装统一的恢复、异常处理和资源清理逻辑。operatorStateBackend 方法的逻辑相比较来说，只是少了 KeyGroupRange 的处理，直接创建 StateBackend 实例。
+
+### 创建和使用 State
+
+KeyedState 是通过调用 StreamingRuntimeContext.getState 方法获取的。
