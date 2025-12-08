@@ -108,4 +108,219 @@ protected <K, R extends Disposable & Closeable> R keyedStatedBackend(
 
 ### 创建和使用 State
 
-KeyedState 是通过调用 StreamingRuntimeContext.getState 方法获取的。
+#### 创建 KeyedState
+
+KeyedState 是通过调用 StreamingRuntimeContext.getState 方法获取的。我们先来看完整的调用流程。
+
+![getState](https://res.cloudinary.com/dxydgihag/image/upload/v1765164156/Blog/flink/12/getstate.png)
+
+在调用 getState 这些方法时，都会先调用 keyedStateStore 提供的方法，它是 Flink 提供的一个封装 keyedStateBackend 的接口。调用流程的最后，是调用 keyedStateBackend 中的 createOrUpdateInternalState 方法（这里我们以 HeapStateBackend 为例）。
+
+```java
+public <N, SV, SEV, S extends State, IS extends S> IS createOrUpdateInternalState(
+        @Nonnull TypeSerializer<N> namespaceSerializer,
+        @Nonnull StateDescriptor<S, SV> stateDesc,
+        @Nonnull StateSnapshotTransformFactory<SEV> snapshotTransformFactory,
+        boolean allowFutureMetadataUpdates)
+        throws Exception {
+    StateTable<K, N, SV> stateTable =
+            tryRegisterStateTable(
+                    namespaceSerializer,
+                    stateDesc,
+                    getStateSnapshotTransformFactory(stateDesc, snapshotTransformFactory),
+                    allowFutureMetadataUpdates);
+
+    @SuppressWarnings("unchecked")
+    IS createdState = (IS) createdKVStates.get(stateDesc.getName());
+    if (createdState == null) {
+        StateCreateFactory stateCreateFactory = STATE_CREATE_FACTORIES.get(stateDesc.getType());
+        if (stateCreateFactory == null) {
+            throw new FlinkRuntimeException(stateNotSupportedMessage(stateDesc));
+        }
+        createdState =
+                stateCreateFactory.createState(stateDesc, stateTable, getKeySerializer());
+    } else {
+        StateUpdateFactory stateUpdateFactory = STATE_UPDATE_FACTORIES.get(stateDesc.getType());
+        if (stateUpdateFactory == null) {
+            throw new FlinkRuntimeException(stateNotSupportedMessage(stateDesc));
+        }
+        createdState = stateUpdateFactory.updateState(stateDesc, stateTable, createdState);
+    }
+
+    createdKVStates.put(stateDesc.getName(), createdState);
+    return createdState;
+}
+
+
+private static final Map<StateDescriptor.Type, StateCreateFactory> STATE_CREATE_FACTORIES =
+        Stream.of(
+                        Tuple2.of(
+                                StateDescriptor.Type.VALUE,
+                                (StateCreateFactory) HeapValueState::create),
+                        Tuple2.of(
+                                StateDescriptor.Type.LIST,
+                                (StateCreateFactory) HeapListState::create),
+                        Tuple2.of(
+                                StateDescriptor.Type.MAP,
+                                (StateCreateFactory) HeapMapState::create),
+                        Tuple2.of(
+                                StateDescriptor.Type.AGGREGATING,
+                                (StateCreateFactory) HeapAggregatingState::create),
+                        Tuple2.of(
+                                StateDescriptor.Type.REDUCING,
+                                (StateCreateFactory) HeapReducingState::create))
+                .collect(Collectors.toMap(t -> t.f0, t -> t.f1));
+```
+
+这里首先是注册了一个 StateTable，这个是 State 中一个非常重要的成员变量，它内部是一个类似 Map 的结构，用来保存 key 和 key 的状态。
+
+STATE_CREATE_FACTORIES 这个变量保存了不同类型的 State 和它对应的创建方法，同理 STATE_UPDATE_FACTORIES 保存的是不同 State 对应的 更新方法。
+
+#### 创建 OperatorState
+
+看完了 KeyedState 的创建过程后，我们再来看下 OperatorState 的创建过程。
+
+OperatorState 的创建方法是通过 FunctionInitializationContext 先获取到 OperatorStateStore，它与 KeyedStateStore 类似，都是对 StateBackend 的方法进行了封装。
+
+```java
+@Override
+public void initializeState(FunctionInitializationContext context) throws Exception {
+    ListStateDescriptor<Tuple2<String, Integer>> descriptor =
+            new ListStateDescriptor<>(
+                    "buffered-elements",
+                    TypeInformation.of(new TypeHint<Tuple2<String, Integer>>() {}));
+
+    checkpointedState = context.getOperatorStateStore().getListState(descriptor);
+
+    if (context.isRestored()) {
+        for (Tuple2<String, Integer> element : checkpointedState.get()) {
+            bufferedElements.add(element);
+        }
+    }
+}
+```
+
+OperatorStateStore 的 getListState 方法中，直接创建出了 PartitionableListState，同时也做了一些缓存操作。
+
+```java
+private <S> ListState<S> getListState(
+        ListStateDescriptor<S> stateDescriptor, OperatorStateHandle.Mode mode)
+        throws StateMigrationException {
+
+    ......
+    PartitionableListState<S> partitionableListState =
+            (PartitionableListState<S>) registeredOperatorStates.get(name);
+
+    if (null == partitionableListState) {
+        // no restored state for the state name; simply create new state holder
+
+        partitionableListState =
+                new PartitionableListState<>(
+                        new RegisteredOperatorStateBackendMetaInfo<>(
+                                name, partitionStateSerializer, mode));
+
+        registeredOperatorStates.put(name, partitionableListState);
+    } else {
+        ......
+    }
+
+    accessedStatesByName.put(name, partitionableListState);
+    return partitionableListState;
+}
+```
+
+PartitionableListState 内部有一个 ArrayList 用于保存数据。
+
+#### 使用 KeyedState
+
+了解完 State 的创建之后，接下来就是 State 的使用了。我们以 HeapValueState 为例来看如何获取 State。
+
+```java
+// HeapValueState 类
+public V value() {
+    final V result = stateTable.get(currentNamespace);
+
+    if (result == null) {
+        return getDefaultValue();
+    }
+
+    return result;
+}
+```
+
+在 HeapValueState 类的 value 方法中，直接调用 StateTable 的 get 方法，最终调用的是 CopyOnWriteStateMap 的 get 方法，这个方法与 HashMap 的 get 方法比较类似。
+
+```java
+public S get(K key, N namespace) {
+
+    final int hash = computeHashForOperationAndDoIncrementalRehash(key, namespace);
+    final int requiredVersion = highestRequiredSnapshotVersion;
+    final StateMapEntry<K, N, S>[] tab = selectActiveTable(hash);
+    int index = hash & (tab.length - 1);
+
+    for (StateMapEntry<K, N, S> e = tab[index]; e != null; e = e.next) {
+        final K eKey = e.key;
+        final N eNamespace = e.namespace;
+        if ((e.hash == hash && key.equals(eKey) && namespace.equals(eNamespace))) {
+
+            // copy-on-write check for state
+            if (e.stateVersion < requiredVersion) {
+                // copy-on-write check for entry
+                if (e.entryVersion < requiredVersion) {
+                    e = handleChainedEntryCopyOnWrite(tab, hash & (tab.length - 1), e);
+                }
+                e.stateVersion = stateMapVersion;
+                e.state = getStateSerializer().copy(e.state);
+            }
+
+            return e.state;
+        }
+    }
+
+    return null;
+}
+```
+
+#### 使用 OperatorState
+
+OperatorState 底层使用的是 PartitionableListState，前面也提到了，它的内部用了一个 ArrayList 来保存数据，对于 OperatorState 的各种操作也都是来操作这个 ArrayList。
+
+```java
+@Override
+public void clear() {
+    internalList.clear();
+}
+
+@Override
+public Iterable<S> get() {
+    return internalList;
+}
+
+@Override
+public void add(S value) {
+    Preconditions.checkNotNull(value, "You cannot add null to a ListState.");
+    internalList.add(value);
+}
+
+@Override
+public void update(List<S> values) {
+    internalList.clear();
+
+    addAll(values);
+}
+
+@Override
+public void addAll(List<S> values) {
+    Preconditions.checkNotNull(values, "List of values to add cannot be null.");
+    if (!values.isEmpty()) {
+        for (S value : values) {
+            checkNotNull(value, "Any value to add to a list cannot be null.");
+            add(value);
+        }
+    }
+}
+```
+
+### 总结
+
+本文对 State 的相关代码进行了梳理。包括 StateBackend 的创建，KeyedState 和 OperatorState 的创建和使用。State 和 Checkpoint 两者需要结合使用，因此后面我们会再梳理 Checkpoint 的相关代码。
