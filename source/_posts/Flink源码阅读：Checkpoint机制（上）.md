@@ -34,8 +34,123 @@ JobManager 在调用 `DefaultExecutionGraphBuilder.buildGraph` 生成 ExecutionG
 
 - masterTriggerCompletionPromise：在 masterStatesComplete 和 coordinatorCheckpointsComplete 都执行完成后，会开始执行 masterTriggerCompletionPromise。masterTriggerCompletionPromise 的任务是调用 triggerCheckpointRequest 来产生 Barrier 消息。具体的触发流程见下图。
 
-![triggerTask](https://res.cloudinary.com/dxydgihag/image/upload/v1765468624/Blog/flink/13/triggerTaskCheckpoint.png)
+![triggerTask](https://res.cloudinary.com/dxydgihag/image/upload/v1765506339/Blog/flink/13/triggerTaskCheckpoint.png)
 
 至此，JobManager 端的触发流程就完成了，接下来就到了 TaskManager 端了。
 
 ### TaskManager 端执行流程
+
+进入 TaskExecutor 后，具体调用过程如下图。
+
+![TaskManagerCheckpoint](https://res.cloudinary.com/dxydgihag/image/upload/v1765508196/Blog/flink/13/tmCheckpoint.png)
+
+TaskManager 的核心逻辑在 `SubtaskCheckpointCoordinatorImpl.checkpointState` 方法中。这个方法中的注释也很详细，整体上分为6个步骤：
+
+0. 判断是否是需要终止的 Checkpoint，如果是，则向下游发送取消 Checkpoint 的广播消息。
+
+1. 做一些前置的准备工作，这一步通常情况下是一个空实现。
+
+2. 向下游发送 Barrier 消息。
+
+3. 注册 Alignment timer，当 aligned 超时时，转换为 unaligned。
+
+4. 通知 StateWriter，当前 Subtask 对输出通道的写入已经完成，并提交状态句柄。
+
+5. 异步执行状态写入并完成上报。
+
+下面我们来关注几个重点的步骤。
+
+#### Barrier 消息
+
+在步骤2中，首先是创建 Barrier，Barrier 消息包括三个部分
+
+```java
+// checkpointId
+private final long id;
+// 时间戳
+private final long timestamp;
+// checkpoint 相关参数，包括对齐类型、checkpoint 类型、目前地址
+private final CheckpointOptions checkpointOptions;
+```
+
+生成 Barrier 之后，会调用 `operatorChain.broadcastEvent` 进行广播消息。这里广播消息就是向下游所有的节点的所有 ResultSubpartition 发送。
+
+#### 状态写入
+
+`SubtaskCheckpointCoordinatorImpl.takeSnapshotSync` 方法用来构建 OperatorSnapshotFutures 中的四个 Future，每个 Future 的任务是为不同类型的 State 提供写入逻辑。
+
+```java
+@Nonnull private RunnableFuture<SnapshotResult<KeyedStateHandle>> keyedStateManagedFuture;
+
+@Nonnull private RunnableFuture<SnapshotResult<KeyedStateHandle>> keyedStateRawFuture;
+
+@Nonnull private RunnableFuture<SnapshotResult<OperatorStateHandle>> operatorStateManagedFuture;
+
+@Nonnull private RunnableFuture<SnapshotResult<OperatorStateHandle>> operatorStateRawFuture;
+```
+
+在底层逻辑中，会为每个 Operator 设置对应的 State 的 Future。具体调用流程如下
+
+![snapshotState](https://res.cloudinary.com/dxydgihag/image/upload/v1765524276/Blog/flink/13/snapshotState.png)
+
+设置好这些 Future 之后，会在 `finishAndReportAsync` 方法中创建 AsyncCheckpointRunnable 线程调用 get 来获取执行结果，拿到执行结果后会将 Checkpoint 信息上报给 CheckpointCoordinator。
+
+![TaskManagerReport](https://res.cloudinary.com/dxydgihag/image/upload/v1765526479/Blog/flink/13/tmReport.png)
+
+### JobManager 端确认流程
+
+TaskManager 通过调用 `checkpointCoordinatorGateway.acknowledgeCheckpoint` 上报 Checkpoint 信息后，流程就又回到 JobManager 了。
+
+JobManager 的确认流程主要做了两件事：
+
+1. 将 pendingCheckpoint 转换成 completedCheckpoint，在这个转换过程中，还做了清理过期 Checkpoint 和持久化元数据等操作。
+
+2. 向所有 commit 的 Task 发送 Checkpoint 完成的通知。收到这个通知后，大部分 Task 没有什么特殊逻辑，也有一部分 Source 或者 Sink 会做提交事务等操作。
+
+至此，JobManager 和 Source 端算子的一次 Checkpoint 就完成了。接下来我们再看一下非 Source 节点是如何做 Checkpoint 的。
+
+### 非 Source 节点处理流程
+
+非 Source 节点处理 Barrier 的入口和处理业务数据的入口相同，都是 `StreamTask.processInput` 方法。我们还是先来看具体的调用流程。
+
+![processBarrier](https://res.cloudinary.com/dxydgihag/image/upload/v1765530817/Blog/flink/13/processBarrier.png)
+
+跟着调用链路，我们一路找到了 processBarrier 方法，这里区分了两个 barrierHandler。SingleCheckpointBarrierHandler 负责处理 EXACTLY_ONCE 语义，CheckpointBarrierTracker 负责处理 AT_LEAST_ONCE 语义。
+
+#### EXACTLY_ONCE
+
+EXACTLY_ONCE 在处理 Barrier 的逻辑如下：
+
+1. 如果只有一个 channel，就立即触发 Checkpoint。
+
+2. 如果有多个 channel，分为三种情况
+   
+   a) 如果收到的是第一个 channel，标记开始进行 barrier 对齐，并阻塞 channel。
+   
+   b) 如果不是第一个 channel，也不是最后一个 channel，只对 channel 进行阻塞。
+   
+   c) 如果收到最后一个 channel，就会触发 Checkpoint，并取消所有 channel 阻塞状态。
+
+这里触发的逻辑与 Source 节点相同，通过调用链路可以一直找到 performCheckpoint。
+
+#### AT_LEAST_ONCE
+
+AT_LEAST_ONCE 处理 Barrier 的逻辑如下：
+
+1. 如果只有一个 channel，就立即触发 Checkpoint。
+
+2. 如果有多个 channel，同样分为三种情况
+   
+   a) 如果收到的是第一个 channel，则更新当前 checkpointID，标记开始 barrier 对齐。
+   
+   b) 如果收到的不是第一个 channel，也不是最后一个 channel，就只做计数。
+   
+   c) 如果收到的是最后一个 channel，就会开始触发 Checkpoint。
+
+这里触发逻辑也是调用 performCheckpoint，与 Source 节点逻辑相同。
+
+### 总结
+
+本文我们梳理了 Checkpoint 的源码逻辑。最开始由 JobManager 中的 CheckpointCoordinator 进行调度，并向 TaskManager 发送触发请求。Source 节点收到请求后会向下游发送 Barrier 消息然后写入状态数据和上报 Checkpoint 信息。CheckpointCoordinator 收集完确认消息后，会持久化元数据并通知所有 Task 完成 commit。最后还分别介绍了 EXACTLY_ONCE 和 AT_LEAST_ONCE 模式下非 Source 节点的处理逻辑。
+
+这里埋一个 Hook，状态数据写入逻辑的细节我们没有深入了解，会在下篇进行深入分析。
