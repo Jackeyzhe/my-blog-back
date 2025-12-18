@@ -71,3 +71,49 @@ SingleOutputStreamOperator<Event> withTimestampsAndWatermarks = source
                 WatermarkStrategy.forBoundedOutOfOrderness(Duration.ofSeconds(20))
         );
 ```
+
+#### 初始化
+
+在定义 Watermark 的时候，我们调用 assignTimestampsAndWatermarks 方法。
+
+```java
+public SingleOutputStreamOperator<T> assignTimestampsAndWatermarks(
+        WatermarkStrategy<T> watermarkStrategy) {
+    final WatermarkStrategy<T> cleanedStrategy = clean(watermarkStrategy);
+    // match parallelism to input, to have a 1:1 source -> timestamps/watermarks relationship
+    // and chain
+    final int inputParallelism = getTransformation().getParallelism();
+    final TimestampsAndWatermarksTransformation<T> transformation =
+            new TimestampsAndWatermarksTransformation<>(
+                    "Timestamps/Watermarks",
+                    inputParallelism,
+                    getTransformation(),
+                    cleanedStrategy,
+                    false);
+    getExecutionEnvironment().addOperator(transformation);
+    return new SingleOutputStreamOperator<>(getExecutionEnvironment(), transformation);
+}
+```
+
+这个方法接收了一个 WatermarkStrategy 参数，把它封装到 TimestampsAndWatermarksTransformation 中之后，就添加到 transformations 列表中了。在生成 StreamGraph 的过程中，会调用每个 transformation 的 transform 方法。
+
+![transform](https://res.cloudinary.com/dxydgihag/image/upload/v1766047572/Blog/flink/15/watermarkTranslate.png)
+
+通过这个调用链路，创建出了 TimestampsAndWatermarksOperatorFactory，在初始化 StreamTask 时，会调用 TimestampsAndWatermarksOperatorFactory.createStreamOperator 方法来创建 TimestampsAndWatermarksOperator，并调用它的 open 方法。
+
+在这个 open 方法中，主要是生成 timestampAssigner 和 watermarkGenerator。timestampAssigner 是用于提取时间戳，watermarkGenerator 是用于生成 Watermark。
+
+生成完成之后注册了一个定时器，到指定时间后会调用 onProcessingTime 方法。
+
+```java
+public void onProcessingTime(long timestamp) throws Exception {
+    watermarkGenerator.onPeriodicEmit(wmOutput);
+
+    final long now = getProcessingTimeService().getCurrentProcessingTime();
+    getProcessingTimeService().registerTimer(now + watermarkInterval, this);
+}
+```
+
+这个方法的逻辑也很简单，先发送创建并发送 Watermark，然后再注册一个定时器。
+
+#### 发送 Watermark
