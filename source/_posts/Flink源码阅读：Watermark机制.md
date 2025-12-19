@@ -99,7 +99,7 @@ public SingleOutputStreamOperator<T> assignTimestampsAndWatermarks(
 
 ![transform](https://res.cloudinary.com/dxydgihag/image/upload/v1766047572/Blog/flink/15/watermarkTranslate.png)
 
-通过这个调用链路，创建出了 TimestampsAndWatermarksOperatorFactory，在初始化 StreamTask 时，会调用 TimestampsAndWatermarksOperatorFactory.createStreamOperator 方法来创建 TimestampsAndWatermarksOperator，并调用它的 open 方法。
+通过这个调用链路，创建出了 TimestampsAndWatermarksOperatorFactory，在初始化 StreamTask 时，会调用 `TimestampsAndWatermarksOperatorFactory.createStreamOperator` 方法来创建 TimestampsAndWatermarksOperator，并调用它的 open 方法。
 
 在这个 open 方法中，主要是生成 timestampAssigner 和 watermarkGenerator。timestampAssigner 是用于提取时间戳，watermarkGenerator 是用于生成 Watermark。
 
@@ -117,3 +117,57 @@ public void onProcessingTime(long timestamp) throws Exception {
 这个方法的逻辑也很简单，先发送创建并发送 Watermark，然后再注册一个定时器。
 
 #### 发送 Watermark
+
+![emitWatermark](https://res.cloudinary.com/dxydgihag/image/upload/v1766112568/Blog/flink/15/emitWatermark.png)
+
+我们以 BoundedOutOfOrdernessWatermarks 为例，它向下游发送了一个 Watermark，时间戳为 maxTimestamp - outOfOrdernessMillis - 1（maxTimestamp 是当前最大的事件时间戳，outOfOrdernessMillis 是我们定义的周期时间毫秒值）。随后在 WatermarkEmitter.emitWatermark 方法中，更新了当前 Watermark 的值。最后 RecordWriterOutput.emitWatermark 则是向下游广播当前的 Watermark。
+
+#### 下游处理
+
+下游处理方法我们从 `StreamOneInputProcessor.processInput` 入手，先来看具体的调用链路。
+
+![processWatermark](https://res.cloudinary.com/dxydgihag/image/upload/v1766133213/Blog/flink/15/processWatermark.png)
+
+在 inputWatermark 方法中，先是对 alignedSubpartitionStatuses 进行调整，alignedSubpartitionStatuses 这个变量主要是用来获取最小的 Watermark。最后调用了 `findAndOutputNewMinWatermarkAcrossAlignedSubpartitions` 方法。这个方法中，会获取到所有上游最小的 Watermark，如果它大于最近发送的一个 Watermark，就会向下游发送。
+
+```java
+public void emitWatermark(Watermark watermark) throws Exception {
+    watermarkGauge.setCurrentWatermark(watermark.getTimestamp());
+    operator.processWatermark(watermark);
+}
+```
+
+这个发送方法中，调用了 `operator.processWatermark`，我们接着看这个处理方法。
+
+![advanceWatermark](https://res.cloudinary.com/dxydgihag/image/upload/v1766136153/Blog/flink/15/advanceWatermark.png)
+
+在 tryAdvanceWatermark 方法中如果 Watermark 的时间大于 eventTimeTimersQueue 队列中头节点的时间，那么对 eventTimeTimersQueue 这个队列进行出队操作，这个操作意味着触发了窗口计算。
+
+```java
+public boolean tryAdvanceWatermark(
+        long time, InternalTimeServiceManager.ShouldStopAdvancingFn shouldStopAdvancingFn)
+        throws Exception {
+    currentWatermark = time;
+    InternalTimer<K, N> timer;
+    boolean interrupted = false;
+    while ((timer = eventTimeTimersQueue.peek()) != null
+            && timer.getTimestamp() <= time
+            && !cancellationContext.isCancelled()
+            && !interrupted) {
+        keyContext.setCurrentKey(timer.getKey());
+        eventTimeTimersQueue.poll();
+        triggerTarget.onEventTime(timer);
+        taskIOMetricGroup.getNumFiredTimers().inc();
+        // Check if we should stop advancing after at least one iteration to guarantee progress
+        // and prevent a potential starvation.
+        interrupted = shouldStopAdvancingFn.test();
+    }
+    return !interrupted;
+}
+```
+
+之后 Watermark 就随着数据流一直到 sink 节点，在 StreamSink 中，支持用户自己实现方法向 sink 中写入 Watermark，除此之外什么也不做。
+
+### 总结
+
+本文我们一起梳理了 Watermark 相关的源码，从 Watermark 的定义，到 Watermark 的处理过程。处理过程分成了初始化、上游发送和下游处理三部分。在下游处理部分，关于触发窗口计算的部分我们简单带过了，后面会再详细介绍这部分。
