@@ -404,3 +404,5 @@ onProcessingTime 和 onEventTime 逻辑基本一致，只是触发条件不同�
 我们调用 windowAll 得到 AllWindowedStream，在构造函数中，会给对 input 调用 keyBy 方法，传入 NullByteKeySelector。后续的逻辑都和 Keyed Window 比较类似。
 
 ### 总结
+
+本文我们梳理了窗口相关的源码，几个重点概念包括 WindowAssginer、WindowOperator、Trigger、Evictor。其中 WindowAssigner 是用来确定一条消息属于哪些窗口，WindowOperator 则是窗口计算逻辑的具体执行层。Trigger 和 Evictor 分别用于触发窗口和清理窗口中数据。
