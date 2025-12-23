@@ -395,13 +395,27 @@ public void onEventTime(InternalTimer<K, W> timer) throws Exception {
 
 onProcessingTime 和 onEventTime 逻辑基本一致，只是触发条件不同，这里就不再赘述了。
 
-至此，Keyed Window 从设置，到使用的源码我们就梳理完成了，下面再来看另外一种窗口 Non-Keyed Window。
+至此，Keyed Window 从设置到使用的源码我们就梳理完成了，下面再来看另外一种窗口 Non-Keyed Window。
 
 ### Non-Keyed Window
 
 ![AllWindow](https://res.cloudinary.com/dxydgihag/image/upload/v1766484574/Blog/flink/16/Non-KeyedWindow.png)
 
-我们调用 windowAll 得到 AllWindowedStream，在构造函数中，会给对 input 调用 keyBy 方法，传入 NullByteKeySelector。后续的逻辑都和 Keyed Window 比较类似。
+我们调用 windowAll 得到 AllWindowedStream，在构造函数中，会给对 input 调用 keyBy 方法，传入 NullByteKeySelector， NullByteKeySelector 对每个 key 都返回0，因此所有的 key 都会被分配到同一个节点。
+
+```java
+public class NullByteKeySelector<T> implements KeySelector<T, Byte> {
+
+    private static final long serialVersionUID = 614256539098549020L;
+
+    @Override
+    public Byte getKey(T value) throws Exception {
+        return 0;
+    }
+}
+```
+
+Non-Keyed Window 后续的逻辑都和 Keyed Window 比较类似。
 
 ### 总结
 
