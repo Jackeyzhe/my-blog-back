@@ -134,7 +134,7 @@ private void addToSubpartition(
 
 了解了具体概念之后，我们再看数据输入的具体流程。
 
-![RecordInput](https://res.cloudinary.com/dxydgihag/image/upload/v1767451781/Blog/flink/18/RecordInput.png)
+![RecordInput](https://res.cloudinary.com/dxydgihag/image/upload/v1767531100/Blog/flink/18/RecordInput.png)
 
 数据输入的入口是 `StreamTask.processInput` 方法，这个方法中主要是调用 `inputProcessor.processInput` 方法，我们以 StreamOneInputProcessor 为例。这个方法就是调用 `input.emitNext` 方法。
 
