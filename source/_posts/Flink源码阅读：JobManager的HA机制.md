@@ -33,3 +33,17 @@ HighAvailabilityServices 中提供的关键组件包括：
 - JobResultStore：用于存储作业结果，这里有两种状态，一种是 dirty，表示作业没有被完全清理，另一种是 clean，表示作业清理工作已经执行完成了。
 
 - BlobStore：存储作业运行期间的一些二进制文件。
+
+#### 选举服务
+
+Flink 的选举是依靠 LeaderElection 和 LeaderContender 配合完成的。LeaderElection 是 LeaderElectionService 的代理接口，提供了注册候选者、确认 leader 和 判断候选者是否是 leader 三个接口。LeaderContender 则是用来表示候选者对象。当一个 LeaderContender 当选 leader 后，LeaderElectionService 会为其生成一个 leaderSessionId，LeaderContender 会调用 confirmLeadershipAsync 发布自己的地址。选举服务的具体实现在 LeaderElectionDriver 接口中。
+
+#### 服务发现
+
+服务发现的作用是获取各组件的 leader 地址。服务发现依赖 LeaderRetrievalService 和 LeaderRetrievalListener。LeaderRetrievalService 可以启动一个监听，当有新的 leader 当选时，会调用 LeaderRetrievalListener 的 notifyLeaderAddress 方法。
+
+#### 信息保存
+
+当 leader 发生切换时，新的 leader 需要获取到旧 leader 存储的信息，这就需要旧 leader 把这些信息存在一个公共的存储上。它可以是 ZooKeeper 或 Kubernetes 的存储，也可以是分布式文件系统的存储。
+
+### 基于 ZooKeeper 的 HA
