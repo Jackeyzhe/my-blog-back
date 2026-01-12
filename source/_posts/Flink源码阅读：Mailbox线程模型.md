@@ -4,7 +4,7 @@ date: 2026-01-09 15:34:54
 tags: Flink
 ---
 
-本文我们来梳理 Flink 的线程模型——Mailbox。
+本文我们来梳理 Flink 的线程模型——Mailbox。<!-- more -->
 
 ### 写在前面
 
