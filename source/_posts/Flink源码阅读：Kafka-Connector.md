@@ -101,7 +101,7 @@ KafkaDynamicTableFactory 包含以下几个方法。
 
 - createDynamicTableSink：创建 DynamicTableSink。
 
-#### Source端
+#### Source 端
 
 工厂类的 createDynamicTableSource 方法创建了 DynamicTableSource，我们来看一下创建的逻辑。
 
@@ -278,4 +278,177 @@ public ScanRuntimeProvider getScanRuntimeProvider(ScanContext context) {
 }
 ```
 
-在 ScanRuntimeProvider 的逻辑中，先获取到反序列化器，也就是刚刚我们提到的 DeserializationSchema。然后创建 KafkaSource 实例，它是 Source 的实现类，也就是执行引擎层了。
+在 ScanRuntimeProvider 的逻辑中，先获取到反序列化器，也就是刚刚我们提到的 DeserializationSchema。
+
+![KafkaSource](https://res.cloudinary.com/dxydgihag/image/upload/v1768318497/Blog/flink/22/KafkaSource.png)
+
+然后开始创建 KafkaSource 实例，它是 Source 的实现类，也就是执行引擎层了，这个过程会依次创建图中这些类。
+
+KafkaSource 中主要是创建 KafkaSourceReader 和 KafkaSourceEnumerator，KafkaSourceEnumerator 是负责和分片相关的逻辑，包括分片分配和分片发现等。
+
+KafkaSourceReader 中主要是和 State 相关的逻辑，包括触发快照和完成 Checkpoint 通知的方法。当做 Snapshot 时，会记录活跃 split 的 offset，同时将 split 作为提交。当 Checkpoint 完成时，会调用 `KafkaSourceFetcherManager.commitOffsets` 提交 offset。
+
+```java
+public List<KafkaPartitionSplit> snapshotState(long checkpointId) {
+    List<KafkaPartitionSplit> splits = super.snapshotState(checkpointId);
+    if (!commitOffsetsOnCheckpoint) {
+        return splits;
+    }
+
+    if (splits.isEmpty() && offsetsOfFinishedSplits.isEmpty()) {
+        offsetsToCommit.put(checkpointId, Collections.emptyMap());
+    } else {
+        Map<TopicPartition, OffsetAndMetadata> offsetsMap =
+                offsetsToCommit.computeIfAbsent(checkpointId, id -> new HashMap<>());
+        // Put the offsets of the active splits.
+        for (KafkaPartitionSplit split : splits) {
+            // If the checkpoint is triggered before the partition starting offsets
+            // is retrieved, do not commit the offsets for those partitions.
+            if (split.getStartingOffset() >= 0) {
+                offsetsMap.put(
+                        split.getTopicPartition(),
+                        new OffsetAndMetadata(split.getStartingOffset()));
+            }
+        }
+        // Put offsets of all the finished splits.
+        offsetsMap.putAll(offsetsOfFinishedSplits);
+    }
+    return splits;
+}
+
+
+public void notifyCheckpointComplete(long checkpointId) throws Exception {
+    LOG.debug("Committing offsets for checkpoint {}", checkpointId);
+    ...
+
+    ((KafkaSourceFetcherManager) splitFetcherManager)
+            .commitOffsets(
+                    committedPartitions,
+                    (ignored, e) -> {...});
+}
+```
+
+KafkaSourceFetcherManager 负责管理 fetcher 线程，提交 Offset。
+
+KafkaPartitionSplitReader 的 fetch 方法用来消费 Kafka 的数据。
+
+```java
+public RecordsWithSplitIds<ConsumerRecord<byte[], byte[]>> fetch() throws IOException {
+    ConsumerRecords<byte[], byte[]> consumerRecords;
+    try {
+        consumerRecords = consumer.poll(Duration.ofMillis(POLL_TIMEOUT));
+    } catch (WakeupException | IllegalStateException e) {
+        // IllegalStateException will be thrown if the consumer is not assigned any partitions.
+        // This happens if all assigned partitions are invalid or empty (starting offset >=
+        // stopping offset). We just mark empty partitions as finished and return an empty
+        // record container, and this consumer will be closed by SplitFetcherManager.
+        KafkaPartitionSplitRecords recordsBySplits =
+                new KafkaPartitionSplitRecords(
+                        ConsumerRecords.empty(), kafkaSourceReaderMetrics);
+        markEmptySplitsAsFinished(recordsBySplits);
+        return recordsBySplits;
+    }
+    KafkaPartitionSplitRecords recordsBySplits =
+            new KafkaPartitionSplitRecords(consumerRecords, kafkaSourceReaderMetrics);
+    List<TopicPartition> finishedPartitions = new ArrayList<>();
+    for (TopicPartition tp : consumer.assignment()) {
+        long stoppingOffset = getStoppingOffset(tp);
+        long consumerPosition = getConsumerPosition(tp, "retrieving consumer position");
+        // Stop fetching when the consumer's position reaches the stoppingOffset.
+        // Control messages may follow the last record; therefore, using the last record's
+        // offset as a stopping condition could result in indefinite blocking.
+        if (consumerPosition >= stoppingOffset) {
+            LOG.debug(
+                    "Position of {}: {}, has reached stopping offset: {}",
+                    tp,
+                    consumerPosition,
+                    stoppingOffset);
+            recordsBySplits.setPartitionStoppingOffset(tp, stoppingOffset);
+            finishSplitAtRecord(
+                    tp, stoppingOffset, consumerPosition, finishedPartitions, recordsBySplits);
+        }
+    }
+
+    // Only track non-empty partition's record lag if it never appears before
+    consumerRecords
+            .partitions()
+            .forEach(
+                    trackTp -> {
+                        kafkaSourceReaderMetrics.maybeAddRecordsLagMetric(consumer, trackTp);
+                    });
+
+    markEmptySplitsAsFinished(recordsBySplits);
+
+    // Unassign the partitions that has finished.
+    if (!finishedPartitions.isEmpty()) {
+        finishedPartitions.forEach(kafkaSourceReaderMetrics::removeRecordsLagMetric);
+        unassignPartitions(finishedPartitions);
+    }
+
+    // Update numBytesIn
+    kafkaSourceReaderMetrics.updateNumBytesInCounter();
+
+    return recordsBySplits;
+}
+```
+
+至此，Source 端相关的源码我们就梳理完了。接下来我们再看 Sink 端的代码。
+
+#### Sink 端
+
+我们从工厂类中的 createDynamicTableSink 方法开始。
+
+```java
+public DynamicTableSink createDynamicTableSink(Context context) {
+    final TableFactoryHelper helper =
+            FactoryUtil.createTableFactoryHelper(
+                    this, autoCompleteSchemaRegistrySubject(context));
+
+    final Optional<EncodingFormat<SerializationSchema<RowData>>> keyEncodingFormat =
+            getKeyEncodingFormat(helper);
+
+    final EncodingFormat<SerializationSchema<RowData>> valueEncodingFormat =
+            getValueEncodingFormat(helper);
+
+    helper.validateExcept(PROPERTIES_PREFIX);
+
+    final ReadableConfig tableOptions = helper.getOptions();
+
+    final DeliveryGuarantee deliveryGuarantee = validateDeprecatedSemantic(tableOptions);
+    validateTableSinkOptions(tableOptions);
+
+    KafkaConnectorOptionsUtil.validateDeliveryGuarantee(tableOptions);
+
+    validatePKConstraints(
+            context.getObjectIdentifier(),
+            context.getPrimaryKeyIndexes(),
+            context.getCatalogTable().getOptions(),
+            valueEncodingFormat);
+
+    final DataType physicalDataType = context.getPhysicalRowDataType();
+
+    final int[] keyProjection = createKeyFormatProjection(tableOptions, physicalDataType);
+
+    final int[] valueProjection = createValueFormatProjection(tableOptions, physicalDataType);
+
+    final String keyPrefix = tableOptions.getOptional(KEY_FIELDS_PREFIX).orElse(null);
+
+    final Integer parallelism = tableOptions.getOptional(SINK_PARALLELISM).orElse(null);
+
+    return createKafkaTableSink(
+            physicalDataType,
+            keyEncodingFormat.orElse(null),
+            valueEncodingFormat,
+            keyProjection,
+            valueProjection,
+            keyPrefix,
+            getTopics(tableOptions),
+            getTopicPattern(tableOptions),
+            getKafkaProperties(context.getCatalogTable().getOptions()),
+            getFlinkKafkaPartitioner(tableOptions, context.getClassLoader()).orElse(null),
+            deliveryGuarantee,
+            parallelism,
+            tableOptions.get(TRANSACTIONAL_ID_PREFIX),
+            tableOptions.get(TRANSACTION_NAMING_STRATEGY));
+}
+```
