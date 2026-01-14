@@ -286,7 +286,7 @@ public ScanRuntimeProvider getScanRuntimeProvider(ScanContext context) {
 
 KafkaSource 中主要是创建 KafkaSourceReader 和 KafkaSourceEnumerator，KafkaSourceEnumerator 是负责和分片相关的逻辑，包括分片分配和分片发现等。
 
-KafkaSourceReader 中主要是和 State 相关的逻辑，包括触发快照和完成 Checkpoint 通知的方法。当做 Snapshot 时，会记录活跃 split 的 offset，同时将 split 作为提交。当 Checkpoint 完成时，会调用 `KafkaSourceFetcherManager.commitOffsets` 提交 offset。
+KafkaSourceReader 中主要是和 State 相关的逻辑，包括触发快照和完成 Checkpoint 通知的方法。当做 Snapshot 时，会记录活跃 split 的 offset，同时将 split 作为状态提交。当 Checkpoint 完成时，会调用 `KafkaSourceFetcherManager.commitOffsets` 提交 offset。
 
 ```java
 public List<KafkaPartitionSplit> snapshotState(long checkpointId) {
@@ -452,3 +452,78 @@ public DynamicTableSink createDynamicTableSink(Context context) {
             tableOptions.get(TRANSACTION_NAMING_STRATEGY));
 }
 ```
+
+和 Source 的流程很相似，这里首先是获取 key 和 value 的编码格式，然后做了很多校验，最后是创建 KafkaDynamicSink 实例。
+
+获取编码格式用到的工厂类是 SerializationFormatFactory，我们前面介绍的 JsonFormatFactory 也实现了 SerializationFormatFactory，因此它既提供了解码格式，又提供了编码格式。编码格式用到的编码器是 JsonRowDataSerializationSchema，通过 RowDataToJsonConverters 将 RowData 转换成 JsonNode。
+
+在 KafkaDynamicSink 的 getSinkRuntimeProvider 方法中，主要就是创建 KafkaSink 实例。
+
+![KafkaSink](https://res.cloudinary.com/dxydgihag/image/upload/v1768363734/Blog/flink/22/KafkaSink.png)
+
+KafkaSink 类实现了 TwoPhaseCommittingStatefulSink 接口，即支持两阶段提交。它创建了 KafkaWrter 和 KafkaCommiter。
+
+创建 KafkaWriter 时，如果配置的是 ExactlyOnce 模式，则会创建出 ExactlyOnceKafkaWriter，否则创建 KafkaWriter。Writer 真正实现两阶段提交的是 ExactlyOnceKafkaWriter。它在启动时，会调用 `producer.beginTransaction` 开启一个事务。数据写入时会调用 `KafkaWriter.write` 方法，此操作会被标记为事务内的操作。当 Sink 收到 Barrier 时，会先调用 flush 方法，将缓冲区的数据都发送到 Kafka Broker，然后调用 prepareCommit 方法预提交。预提交方法中记录 epoch 和 transactionalId 返回给框架层。
+
+```java
+public Collection<KafkaCommittable> prepareCommit() {
+    // only return a KafkaCommittable if the current transaction has been written some data
+    if (currentProducer.hasRecordsInTransaction()) {
+        KafkaCommittable committable = KafkaCommittable.of(currentProducer);
+        LOG.debug("Prepare {}.", committable);
+        currentProducer.precommitTransaction();
+        return Collections.singletonList(committable);
+    }
+
+    // otherwise, we recycle the producer (the pool will reset the transaction state)
+    producerPool.recycle(currentProducer);
+    return Collections.emptyList();
+}
+```
+
+状态保存时，会将预提交的 transactionalId 存到状态中。
+
+```java
+public List<KafkaWriterState> snapshotState(long checkpointId) throws IOException {
+    // recycle committed producers
+    TransactionFinished finishedTransaction;
+    while ((finishedTransaction = backchannel.poll()) != null) {
+        producerPool.recycleByTransactionId(
+                finishedTransaction.getTransactionId(), finishedTransaction.isSuccess());
+    }
+    // persist the ongoing transactions into the state; these will not be aborted on restart
+    Collection<CheckpointTransaction> ongoingTransactions =
+            producerPool.getOngoingTransactions();
+    currentProducer = startTransaction(checkpointId + 1);
+    return createSnapshots(ongoingTransactions);
+}
+
+private List<KafkaWriterState> createSnapshots(
+        Collection<CheckpointTransaction> ongoingTransactions) {
+    List<KafkaWriterState> states = new ArrayList<>();
+    int[] subtaskIds = this.ownedSubtaskIds;
+    for (int index = 0; index < subtaskIds.length; index++) {
+        int ownedSubtask = subtaskIds[index];
+        states.add(
+                new KafkaWriterState(
+                        transactionalIdPrefix,
+                        ownedSubtask,
+                        totalNumberOfOwnedSubtasks,
+                        transactionNamingStrategy.getOwnership(),
+                        // new transactions are only created with the first owned subtask id
+                        index == 0 ? ongoingTransactions : List.of()));
+    }
+    LOG.debug("Snapshotting state {}", states);
+    return states;
+}
+```
+
+当 Checkpoint 完成时，会调用 `KafkaCommitter.commit` 方法。在 commit 方法中会调用 `producer.commitTransaction` 正式提交事务。
+
+FlinkKafkaInternalProducer 是 Flink 内部封装的与 Kafka 生产者的交互类，所有与 Kafka 生产者的交互都通过它执行。
+
+关于 Kafka Connector 的 Sink 端的源码我们就梳理到这里。
+
+### 总结
+
+最后还是总结一下。本文我们先了解了 Flink 中自定义 Source 和 Sink 的流程。按照这个流程，我们梳理了 Kafka Connector 的源码。在 Source 端，Flink Kafka 封装了对消费者 Offset 的提交逻辑。在 Sink 端结合了 Kafka 提供的事务支持实现了两阶段提交的逻辑。
