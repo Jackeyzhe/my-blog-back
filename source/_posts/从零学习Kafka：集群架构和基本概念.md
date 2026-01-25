@@ -60,4 +60,4 @@ Partition 类似于 HBase 中的 region，它是用来支撑横向扩展的。�
 
 ### 总结
 
-本文我们先是简单介绍了什么是 Kafka，接着又介绍了几个核心概念。包括 Topic、Producer、Consumer、Consumer Group、Partition、Replica、Broker、Rebalance等。我们从这里开始一起来学习 Kafka 相关的知识。
+本文我们先是简单介绍了什么是 Kafka，接着又介绍了几个核心概念。包括 Topic、Producer、Consumer、Consumer Group、Partition、Replica、Broker、Rebalance等。接下来让我们一起开始学习 Kafka 相关的知识吧。
