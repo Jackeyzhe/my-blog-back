@@ -31,3 +31,23 @@ Kafka 同时支持这两种模型，这点我们在后面会具体阐述。
 现在知道了什么是 Kafka 之后，我们再来考虑另一个问题：为什么要使用 Kafka？
 
 这个问题每个人可能会有不同的答案，对我而言，使用 Kafka 最主要的原因是做流量缓冲和数据同步。
+
+流量缓冲是 Kafka 的应用场景之一，在上面的例子中，当系统 A 有很大的突增流量时，如果直接对接系统 B，那么瞬时流量很有可能直接把系统 B 打挂。而 Kafka 就可以在中间起到一个缓冲的作用。给系统 B 留出充足的处理时间，同时也避免了因为系统 B 崩溃可能导致的整个链路的雪崩问题。
+
+数据同步在实际应用场景中更多与 Flink 结合，完成离线数据链路流转或者离线到在线的数据传输。
+
+有了这些基本的背景信息之后，我们再来看一些 Kafka 的核心概念。
+
+### 核心概念
+
+我们从一张图开始，对图中的概念逐个进行解释。
+
+![KafkaCluster](https://res.cloudinary.com/dxydgihag/image/upload/v1769137576/Blog/Kafka/0/KafkaCluster.png)
+
+首先是 Topic，在 Kafka 中发布和订阅的对象就是 Topic。通常我们按照业务来拆分，把不同业务的数据放在不同的 Topic 中。
+
+Topic 的数据是由 Producer 生产的。Producer 即生产者程序，它和 Consumer 都可以被称为 Kafka 集群的客户端。Producer 负责把消息写入对应的 Topic 中，在写入时会选择对应的 Partition。
+
+Partition 类似于 HBase 中的 region，它是用来支撑横向扩展的。当我们的消息量太大时，一个 Partition 存不下或者处理不过来，我们可以选择扩 Partition 的数量。利用多分区分散存储和处理请求的压力。你可能还注意到，Partition 还有 Leader 和 Follower 之分，这其实是 Kafka 的副本机制，每个分区都会有 1 个 Leader 副本和 n 个 Follower 副本，Producer 向 Leader 副本写消息，Consumer 从 Leader 副本
+
+在 Kafka 集群的服务端，由 Broker 进程对客户端的请求进行处理。将多个 Broker 集群分别部署在不同的机器上是 Kafka 的高可用手段之一。
