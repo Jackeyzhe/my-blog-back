@@ -48,6 +48,16 @@ Kafka 同时支持这两种模型，这点我们在后面会具体阐述。
 
 Topic 的数据是由 Producer 生产的。Producer 即生产者程序，它和 Consumer 都可以被称为 Kafka 集群的客户端。Producer 负责把消息写入对应的 Topic 中，在写入时会选择对应的 Partition。
 
-Partition 类似于 HBase 中的 region，它是用来支撑横向扩展的。当我们的消息量太大时，一个 Partition 存不下或者处理不过来，我们可以选择扩 Partition 的数量。利用多分区分散存储和处理请求的压力。你可能还注意到，Partition 还有 Leader 和 Follower 之分，这其实是 Kafka 的副本机制，每个分区都会有 1 个 Leader 副本和 n 个 Follower 副本，Producer 向 Leader 副本写消息，Consumer 从 Leader 副本
+Partition 类似于 HBase 中的 region，它是用来支撑横向扩展的。当我们的消息量太大时，一个 Partition 存不下或者处理不过来，我们可以选择扩 Partition 的数量。利用多分区分散存储和处理请求的压力。你可能还注意到，Partition 还有 Leader 和 Follower 之分，这其实是 Kafka 的副本机制（Replica），它是 Kafka 高可用手段之一。每个分区都会有 1 个 Leader 副本和 n 个 Follower 副本，写入消息和消费消息都是由 Leader 副本执行，Follower 只负责向 Leader 副本发送请求，将最新的消息发送给它，这样与 Leader 副本保持同步。
 
 在 Kafka 集群的服务端，由 Broker 进程对客户端的请求进行处理。将多个 Broker 集群分别部署在不同的机器上是 Kafka 的高可用手段之一。
+
+前面我们提到了 Kafka 除了发布/订阅模型之外，还支持点对点模型，对于点对点模型的支持，Kafka 是引入了 Consumer Group 的概念。Consumer Group 是由多个 Consumer 组成，负责消费一组主题，这组主题中的每一个 Partition 只能由其中的一个 Consumer 消费。如果有新增的 Consumer 加入或者现有的 Consumer 崩溃，那么就会进行 Rebalance。
+
+在消息写入和消费流程中，分别有 Offset 和 Consumer Offset 两个概念。Offset 是在分区中递增的。Consumer Offset 是消费者用来记录自己消费到了哪个 Offset。
+
+最后再多提一点，Kafka Broker 是使用 Log 保存数据，Log 底层又分成了多个 Log Segment，消息在 Log Segment 上只能追加写入，当一个 Log Segment 写满后，就会创建新的 Log Segment 继续写入。Kafka 还会定期清理旧的 Log Segment，以此来节省磁盘空间。
+
+### 总结
+
+本文我们先是简单介绍了什么是 Kafka，接着又介绍了几个核心概念。包括 Topic、Producer、Consumer、Consumer Group、Partition、Replica、Broker、Rebalance等。我们从这里开始一起来学习 Kafka 相关的知识。
