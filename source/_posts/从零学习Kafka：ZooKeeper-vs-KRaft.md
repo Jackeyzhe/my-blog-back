@@ -18,7 +18,7 @@ tags: Kafka
 
 #### 一致性风险
 
-在 ZooKeeper 模式下，集群本质上存在两个权利中心（ZooKeeper 和 Kafka Controller），它们之间的数据同步延迟会带来一致性问题。我们来看一个具体的场景。
+在 ZooKeeper 模式下，集群本质上存在两个权力中心（ZooKeeper 和 Kafka Controller），它们之间的数据同步延迟会带来一致性问题。我们来看一个具体的场景。
 
 假设我们现在有一个三台 Broker 的集群，分别为 Broker0，Broker1，Broker2，Broker0 为当前 Controller。
 
